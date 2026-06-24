@@ -4,7 +4,8 @@
       <h2 style="margin: 0;">库存管理系统 - 商品管理</h2>
       <el-button type="danger" @click="logout">退出登录</el-button>
     </div>
-    <!-- 搜索栏 -->
+
+    <!-- 搜索栏 + 操作按钮 -->
     <el-row :gutter="20" style="margin-bottom: 20px;">
       <el-col :span="6">
         <el-input v-model="searchKeyword" placeholder="请输入商品名称" />
@@ -15,6 +16,8 @@
       </el-col>
       <el-col :span="12" style="text-align: right;">
         <el-button type="success" @click="dialogVisible = true">新增商品</el-button>
+        <el-button type="warning" @click="handleExport">📥 导出Excel</el-button>
+        <el-button type="primary" @click="importDialogVisible = true">📤 导入Excel</el-button>
       </el-col>
     </el-row>
 
@@ -33,6 +36,17 @@
         </template>
       </el-table-column>
     </el-table>
+
+    <!-- 分页 -->
+    <el-pagination
+      v-model:current-page="pageNum"
+      v-model:page-size="pageSize"
+      :total="total"
+      layout="total, sizes, prev, pager, next, jumper"
+      @size-change="fetchData"
+      @current-change="fetchData"
+      style="margin-top: 20px; justify-content: flex-end;"
+    />
 
     <!-- 新增弹窗 -->
     <el-dialog v-model="dialogVisible" title="新增商品" width="500px" @close="resetForm">
@@ -84,24 +98,39 @@
       </template>
     </el-dialog>
 
-    <!-- 分页 -->
-    <el-pagination
-      v-model:current-page="pageNum"
-      v-model:page-size="pageSize"
-      :total="total"
-      layout="total, sizes, prev, pager, next, jumper"
-      @size-change="fetchData"
-      @current-change="fetchData"
-      style="margin-top: 20px; justify-content: flex-end;"
-    />
+    <!-- 导入对话框 -->
+    <el-dialog v-model="importDialogVisible" title="导入商品" width="450px">
+      <el-upload
+        ref="uploadRef"
+        action="/api/products/import"
+        :headers="uploadHeaders"
+        :on-success="handleImportSuccess"
+        :on-error="handleImportError"
+        :before-upload="beforeUpload"
+        accept=".xlsx,.xls"
+        drag
+      >
+        <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
+        <div style="margin-top: 10px;">拖拽或点击上传 Excel 文件</div>
+        <div style="font-size: 12px; color: #999; margin-top: 5px;">支持 .xlsx / .xls 格式</div>
+      </el-upload>
+      <template #footer>
+        <el-button @click="importDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="downloadTemplate">下载导入模板</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script>
 import axios from 'axios'
+import { UploadFilled } from '@element-plus/icons-vue'
 
 export default {
   name: 'Products',
+  components: {
+    UploadFilled
+  },
   data() {
     return {
       tableData: [],
@@ -125,6 +154,15 @@ export default {
         price: 0,
         stock: 0,
         minStock: 0
+      },
+      importDialogVisible: false,
+      uploadRef: null
+    }
+  },
+  computed: {
+    uploadHeaders() {
+      return {
+        Authorization: `Bearer ${localStorage.getItem('token')}`
       }
     }
   },
@@ -132,6 +170,8 @@ export default {
     this.fetchData()
   },
   methods: {
+    // ========== 原有方法 ==========
+
     async fetchData() {
       try {
         const res = await axios.get('/api/products/page', {
@@ -227,6 +267,127 @@ export default {
       localStorage.removeItem('token')
       localStorage.removeItem('username')
       window.location.reload()
+    },
+
+    // ========== ⭐ 修改：导出（使用 axios） ==========
+
+    async handleExport() {
+      try {
+        const res = await axios({
+          method: 'get',
+          url: '/api/products/export',
+          responseType: 'blob',
+          headers: {
+            Authorization: `Bearer ${localStorage.getItem('token')}`
+          }
+        })
+
+        // 从响应头获取文件名
+        const contentDisposition = res.headers['content-disposition']
+        let fileName = '商品库存.xlsx'
+        if (contentDisposition) {
+          const match = contentDisposition.match(/filename\*=utf-8''(.+)/)
+          if (match) {
+            fileName = decodeURIComponent(match[1])
+          }
+        }
+
+        // 创建下载链接
+        const blob = new Blob([res.data], {
+          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        })
+        const link = document.createElement('a')
+        link.href = URL.createObjectURL(blob)
+        link.download = fileName
+        document.body.appendChild(link)
+        link.click()
+        document.body.removeChild(link)
+        URL.revokeObjectURL(link.href)
+      } catch (error) {
+        console.error('导出失败', error)
+        // 如果返回的是 JSON 错误（如 401），解析提示
+        if (error.response && error.response.data instanceof Blob) {
+          try {
+            const text = await error.response.data.text()
+            const json = JSON.parse(text)
+            this.$message.error(json.message || '导出失败')
+          } catch {
+            this.$message.error('导出失败')
+          }
+        } else {
+          this.$message.error(error.response?.data?.message || '导出失败')
+        }
+      }
+    },
+
+    // ========== 导入相关（不变） ==========
+
+    handleImportSuccess(response) {
+      if (response.code === 200) {
+        this.$message.success(response.message || '导入成功')
+        this.importDialogVisible = false
+        this.fetchData()
+      } else {
+        this.$message.error(response.message || '导入失败')
+      }
+    },
+
+    handleImportError() {
+      this.$message.error('导入失败，请检查文件格式')
+    },
+
+    beforeUpload(file) {
+      const isExcel = file.type === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+                       file.type === 'application/vnd.ms-excel'
+      if (!isExcel) {
+        this.$message.error('请上传 Excel 文件')
+        return false
+      }
+      const isLt10M = file.size / 1024 / 1024 < 10
+      if (!isLt10M) {
+        this.$message.error('文件大小不能超过 10MB')
+        return false
+      }
+      return true
+    },
+
+    // ========== ⭐ 修改：下载模板（使用 axios） ==========
+
+    async downloadTemplate() {
+      try {
+        const res = await axios({
+          method: 'get',
+          url: '/api/products/export/template',
+          responseType: 'blob',
+          headers: {
+            Authorization: `Bearer ${localStorage.getItem('token')}`
+          }
+        })
+
+        const blob = new Blob([res.data], {
+          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        })
+        const link = document.createElement('a')
+        link.href = URL.createObjectURL(blob)
+        link.download = '商品导入模板.xlsx'
+        document.body.appendChild(link)
+        link.click()
+        document.body.removeChild(link)
+        URL.revokeObjectURL(link.href)
+      } catch (error) {
+        console.error('下载模板失败', error)
+        if (error.response && error.response.data instanceof Blob) {
+          try {
+            const text = await error.response.data.text()
+            const json = JSON.parse(text)
+            this.$message.error(json.message || '下载模板失败')
+          } catch {
+            this.$message.error('下载模板失败')
+          }
+        } else {
+          this.$message.error('下载模板失败')
+        }
+      }
     }
   }
 }
